@@ -199,10 +199,13 @@ def _create_poll_for_motion(meeting_id: str, motion_item_id: str, motion_uuid: s
     }
     
     try:
+        print(f"📤 Publishing voting.create event: {vote_data}")
         publish_event("voting.create", {"vote": vote_data})
         print(f"📊 Created poll for motion {motion_uuid}: {motion_text[:50]}...")
     except Exception as e:
         print(f"❌ Failed to create poll for motion {motion_uuid}: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 
@@ -474,6 +477,7 @@ def on_event(event: dict):
 
     if et == "voting.created":
         # data: { poll_uuid, poll_id?, meeting_id, origin? }
+        print(f"📥 Received voting.created event: {data}")
         poll_uuid = data.get("poll_uuid")
         origin = data.get("origin") or {}
         motion_item_id = origin.get("motion_item_id")
@@ -501,6 +505,8 @@ def on_event(event: dict):
             }, room=motion_item_id)
             
             print(f"✅ Poll {poll_uuid} opened for motion {motion_uuid}")
+        else:
+            print(f"⚠️ Incomplete voting.created data - motion_item_id: {motion_item_id}, poll_uuid: {poll_uuid}, motion_uuid: {motion_uuid}")
 
     if et == "voting.completed":
         # data: { poll_uuid, meeting_id, results, total_votes }
