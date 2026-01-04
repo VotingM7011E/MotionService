@@ -426,7 +426,7 @@ def on_event(event: dict):
                     socketio.emit("poll_completed", {"poll_uuid": poll_uuid, "results": results, "total_votes": total_votes}, room=meeting_id)
 
 # Start consumer thread (after app exists)
-default_bindings = os.getenv("MQ_BINDINGS", "motion.create_motion_item").split(",")
+default_bindings = os.getenv("MQ_BINDINGS", "motion.create_motion_item,motion.start_voting").split(",")
 # Ensure we listen for voting lifecycle events
 for rk in ["voting.created", "voting.completed"]:
     if rk not in default_bindings:
