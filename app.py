@@ -57,7 +57,7 @@ mongo = PyMongo(app)
 # Internal functions
 # ---------------------------
 
-def create_motion_item(data):
+def create_motion_item(data: dict):
     # Expects data on the form
     # data = {
     #   meeting_id: uuid
@@ -69,8 +69,68 @@ def create_motion_item(data):
     #       }
     #   ]
     # }
-    
 
+    meeting_id = data.get("meeting_id")
+    motion_item_id = data.get("motion_item_id")
+    motions = data.get("motions", [])
+
+    if not meeting_id:
+        raise ValueError("Missing 'meeting_id'")
+    if not motion_item_id:
+        raise ValueError("Missing 'motion_item_id'")
+    if not motions:
+        raise ValueError("Missing 'motions'")
+
+    sanitized_motions = []
+
+    for motion in motions:
+        owner = motion.get("owner")
+        motion_text = motion.get("motion")
+        if not owner:
+            raise ValueError(f"Missing 'owner' in {motion}")
+        if not motion_text:
+            raise ValueError(f"Missing 'motion_text' in {motion}")
+        sanitized_motions.append({
+            "owner": owner,
+            "motion": motion_text
+        })
+
+    mongo.db.motion_items.insert_one({
+        "meeting_id": meeting_id,
+        "motion_item_id": motion_item_id,
+        "motions": sanitized_motions
+    })
+    
+def add_motion_to_motion_item(motion_item_id, motion):
+    # Expects motion data on the form
+    # motion = {
+    #   owner: username
+    #   motion: string
+    # }
+    # 
+
+    if not motion_item_id: 
+        raise ValueError("Missing 'motion_item_id'")
+    if not motion: 
+        raise ValueError("Missing 'motion'")
+
+    owner = motion.get("owner")
+    motion_text = motion.get("motion")
+
+    if not owner: 
+        raise ValueError(f"Missing 'owner' in {motion}")
+    if not motion_text: 
+        raise ValueError(f"Missing 'motion' in {motion}")
+
+    sanitized_motion = {
+        "owner": owner,
+        "motion": motion_text
+    }
+
+    mongo.db.motion_items.update_one(
+        {"motion_item_id": motion_item_id},
+        {"$push": {"motions": sanitized_motion}}
+    )
 
 
 
