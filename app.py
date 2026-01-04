@@ -181,6 +181,30 @@ def _set_poll_state(motion_item_id, state: str, extra: dict = None):
         {"$set": update}
     )
 
+def _create_poll_for_motion(meeting_id: str, motion_item_id: str, motion_uuid: str, motion_text: str):
+    """Create a poll for a specific motion with yes/no/abstain options."""
+    options = ["yes", "no", "abstain"]
+    poll_type = "single"
+    
+    # Build vote payload for VotingService
+    vote_data = {
+        "meeting_id": meeting_id,
+        "pollType": poll_type,
+        "options": options,
+        "question": motion_text,  # Include the motion text as the poll question
+        "origin": {
+            "motion_item_id": motion_item_id,
+            "motion_uuid": motion_uuid
+        }
+    }
+    
+    try:
+        publish_event("voting.create", {"vote": vote_data})
+        print(f"📊 Created poll for motion {motion_uuid}: {motion_text[:50]}...")
+    except Exception as e:
+        print(f"❌ Failed to create poll for motion {motion_uuid}: {e}")
+        raise
+
 
 # ---------------------------
 # Endpoints
@@ -397,70 +421,192 @@ def on_event(event: dict):
         # }
         create_motion_item(data)
     if et == "motion.start_voting":
-        # data = { meeting_id: uuid, motion_item_id: uuid, options?: [..], pollType?: 'single'|'ranked' }
+        # data = { meeting_id: uuid, motion_item_id: uuid }
+        # Creates sequential polls for each motion, one at a time
         meeting_id = data.get("meeting_id")
         motion_item_id = data.get("motion_item_id")
-        options = data.get("options") or ["yes", "no", "abstain"]
-        poll_type = data.get("pollType") or "single"
 
         if not meeting_id or not motion_item_id:
+            print("❌ Missing meeting_id or motion_item_id")
             return
 
-        # Persist minimal poll info on motion item (no expected_voters)
-        poll_doc = {
-            "poll_state": "created",
-            "poll_options": options,
-            "poll_type": poll_type,
-            "poll_created_at": datetime.now(timezone.utc).isoformat(),
+        # Get all motions for this motion item
+        motion_item = mongo.db.motion_items.find_one({"motion_item_id": motion_item_id})
+        if not motion_item:
+            print(f"❌ Motion item {motion_item_id} not found")
+            return
+        
+        motions = motion_item.get("motions", [])
+        if not motions:
+            print(f"❌ No motions found for motion item {motion_item_id}")
+            return
+        
+        # Initialize voting session tracking all motions
+        voting_session = {
+            "state": "in_progress",
+            "motion_queue": [m["motion_uuid"] for m in motions],
+            "current_index": 0,
+            "poll_history": [],
+            "started_at": datetime.now(timezone.utc).isoformat()
         }
+        
         mongo.db.motion_items.update_one(
             {"motion_item_id": motion_item_id},
-            {"$set": {"poll": poll_doc}}
+            {"$set": {"voting_session": voting_session}}
         )
-
-        # Build vote payload and publish to VotingService (do not include expected_voters)
-        vote_data = {
-            "meeting_id": meeting_id,
-            # do not set poll_id so VotingService will assign and publish back poll_uuid
-            "pollType": poll_type,
-            "options": options,
-            "origin": {"motion_item_id": motion_item_id}
-        }
-
+        
+        # Create poll for the first motion
+        first_motion = motions[0]
         try:
-            publish_event("voting.create", {"vote": vote_data})
-        except Exception:
-            # best-effort publish
-            pass
+            _create_poll_for_motion(
+                meeting_id,
+                motion_item_id,
+                first_motion["motion_uuid"],
+                first_motion["motion"]
+            )
+            print(f"✅ Started voting session for motion item {motion_item_id} with {len(motions)} motions")
+        except Exception as e:
+            print(f"❌ Failed to start voting session: {e}")
+            mongo.db.motion_items.update_one(
+                {"motion_item_id": motion_item_id},
+                {"$set": {"voting_session.state": "error"}}
+            )
 
     if et == "voting.created":
         # data: { poll_uuid, poll_id?, meeting_id, origin? }
         poll_uuid = data.get("poll_uuid")
         origin = data.get("origin") or {}
         motion_item_id = origin.get("motion_item_id")
-        if motion_item_id and poll_uuid:
+        motion_uuid = origin.get("motion_uuid")
+        
+        if motion_item_id and poll_uuid and motion_uuid:
+            # Update current poll info
+            poll_doc = {
+                "poll_uuid": poll_uuid,
+                "poll_state": "open",
+                "motion_uuid": motion_uuid,
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }
+            
             mongo.db.motion_items.update_one(
                 {"motion_item_id": motion_item_id},
-                {"$set": {"poll.poll_uuid": poll_uuid, "poll.poll_state": "open"}}
+                {"$set": {"poll": poll_doc}}
             )
+            
+            # Notify clients that a new poll is active
+            socketio.emit("poll_started", {
+                "motion_item_id": motion_item_id,
+                "poll_uuid": poll_uuid,
+                "motion_uuid": motion_uuid
+            }, room=motion_item_id)
+            
+            print(f"✅ Poll {poll_uuid} opened for motion {motion_uuid}")
 
     if et == "voting.completed":
         # data: { poll_uuid, meeting_id, results, total_votes }
         poll_uuid = data.get("poll_uuid")
         results = data.get("results")
         total_votes = data.get("total_votes")
-        if poll_uuid:
-            # find motion item by poll_uuid and mark completed
+        
+        if not poll_uuid:
+            return
+        
+        # Find motion item by current poll_uuid
+        motion_item = mongo.db.motion_items.find_one({"poll.poll_uuid": poll_uuid})
+        if not motion_item:
+            print(f"❌ Motion item not found for poll {poll_uuid}")
+            return
+        
+        motion_item_id = motion_item["motion_item_id"]
+        meeting_id = motion_item.get("meeting_id")
+        voting_session = motion_item.get("voting_session")
+        current_poll = motion_item.get("poll", {})
+        motion_uuid = current_poll.get("motion_uuid")
+        
+        # Add to poll history
+        if voting_session and motion_uuid:
+            poll_record = {
+                "motion_uuid": motion_uuid,
+                "poll_uuid": poll_uuid,
+                "results": results,
+                "total_votes": total_votes,
+                "completed_at": datetime.now(timezone.utc).isoformat()
+            }
+            
             mongo.db.motion_items.update_one(
-                {"poll.poll_uuid": poll_uuid},
-                {"$set": {"poll.poll_state": "completed", "poll.results": results, "poll.total_votes": total_votes, "poll.completed_at": datetime.now(timezone.utc).isoformat()}}
+                {"motion_item_id": motion_item_id},
+                {
+                    "$push": {"voting_session.poll_history": poll_record},
+                    "$set": {"poll.poll_state": "completed"}
+                }
             )
-            # notify clients in the meeting room if we can find meeting_id
-            item = mongo.db.motion_items.find_one({"poll.poll_uuid": poll_uuid}, {"_id": 0})
-            if item:
-                meeting_id = item.get("meeting_id")
-                if meeting_id:
-                    socketio.emit("poll_completed", {"poll_uuid": poll_uuid, "results": results, "total_votes": total_votes}, room=meeting_id)
+            
+            # Notify clients that poll completed
+            socketio.emit("poll_completed", {
+                "motion_item_id": motion_item_id,
+                "poll_uuid": poll_uuid,
+                "motion_uuid": motion_uuid,
+                "results": results,
+                "total_votes": total_votes
+            }, room=motion_item_id)
+            
+            print(f"✅ Poll {poll_uuid} completed for motion {motion_uuid}")
+            
+            # Check if there are more motions to vote on
+            current_index = voting_session.get("current_index", 0)
+            motion_queue = voting_session.get("motion_queue", [])
+            next_index = current_index + 1
+            
+            if next_index < len(motion_queue):
+                # Start next poll
+                next_motion_uuid = motion_queue[next_index]
+                
+                # Find the motion text
+                motions = motion_item.get("motions", [])
+                next_motion = next((m for m in motions if m["motion_uuid"] == next_motion_uuid), None)
+                
+                if next_motion:
+                    # Update index
+                    mongo.db.motion_items.update_one(
+                        {"motion_item_id": motion_item_id},
+                        {"$set": {"voting_session.current_index": next_index}}
+                    )
+                    
+                    # Create next poll
+                    try:
+                        _create_poll_for_motion(
+                            meeting_id,
+                            motion_item_id,
+                            next_motion["motion_uuid"],
+                            next_motion["motion"]
+                        )
+                        print(f"📊 Started poll {next_index + 1}/{len(motion_queue)} for motion {next_motion_uuid}")
+                    except Exception as e:
+                        print(f"❌ Failed to create next poll: {e}")
+                        mongo.db.motion_items.update_one(
+                            {"motion_item_id": motion_item_id},
+                            {"$set": {"voting_session.state": "error"}}
+                        )
+                else:
+                    print(f"❌ Next motion {next_motion_uuid} not found")
+            else:
+                # All motions have been voted on
+                mongo.db.motion_items.update_one(
+                    {"motion_item_id": motion_item_id},
+                    {"$set": {
+                        "voting_session.state": "completed",
+                        "voting_session.completed_at": datetime.now(timezone.utc).isoformat()
+                    }}
+                )
+                
+                # Notify clients that all voting is complete
+                socketio.emit("voting_session_completed", {
+                    "motion_item_id": motion_item_id,
+                    "total_polls": len(motion_queue),
+                    "poll_history": voting_session.get("poll_history", []) + [poll_record]
+                }, room=motion_item_id)
+                
+                print(f"✅ Voting session completed for motion item {motion_item_id}")
 
 # Start consumer thread (after app exists)
 default_bindings = os.getenv("MQ_BINDINGS", "motion.create_motion_item,motion.start_voting").split(",")
