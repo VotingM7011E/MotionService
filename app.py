@@ -32,27 +32,32 @@ socketio = SocketIO(app, cors_allowed_origins="*", #Changing this to * for testi
 # SocketIO Events
 # ---------------------------
 
-#@socketio.on('connect')
-#def on_connect(auth):
-#   token = auth.get('token') if auth else None
-    # validate token (Keycloak) and set user info (or disconnect)
-#
-#@socketio.on('join')
-#def on_join(data):
-#    meeting_id = data['meeting_id']
-#    join_room(meeting_id)
-#    emit('status', {'msg': f'User has entered the meeting {meeting_id}.'}, room=meeting_id)
-#
-#@socketio.on('leave')
-#def on_leave(data):
-#    meeting_id = data['meeting_id']
-#    leave_room(meeting_id)
-#    emit('status', {'msg': f'User has left the meeting {meeting_id}.'}, room=meeting_id)
-#
-#@socketio.on('Next Agenda Item')
-#def moving_on_to_next_agenda_item(data):
-#    emit('Next Agenda Item', data, room=data['meeting_id'])
-#
+@socketio.on('connect')
+def on_connect(auth):
+    token = auth.get('token') if auth else None
+    print(f"Client connected to Motion Service with token: {token[:20] if token else 'None'}...")
+    # Optionally validate token (Keycloak) here
+
+@socketio.on('disconnect')
+def on_disconnect():
+    print("Client disconnected from Motion Service")
+
+@socketio.on('join_motion_item')
+def on_join_motion_item(data):
+    motion_item_id = data.get('motion_item_id')
+    if motion_item_id:
+        join_room(motion_item_id)
+        print(f"Client joined motion item room: {motion_item_id}")
+        emit('status', {'msg': f'Joined motion item {motion_item_id}'}, room=motion_item_id)
+
+@socketio.on('leave_motion_item')
+def on_leave_motion_item(data):
+    motion_item_id = data.get('motion_item_id')
+    if motion_item_id:
+        leave_room(motion_item_id)
+        print(f"Client left motion item room: {motion_item_id}")
+        emit('status', {'msg': f'Left motion item {motion_item_id}'}, room=motion_item_id)
+
 
 def to_uuid(id_str):
     """Validate and convert UUID string."""
@@ -253,6 +258,22 @@ def add_motion_endpoint(motion_item_id):
     
     try:
         add_motion_to_motion_item(uid, motion)
+        
+        # Get the newly created motion with its UUID
+        updated_item = mongo.db.motion_items.find_one(
+            {"motion_item_id": uid},
+            {"_id": 0, "motions": 1}
+        )
+        if updated_item and updated_item.get("motions"):
+            # Find the latest motion (the one we just added)
+            new_motion = updated_item["motions"][-1]
+            
+            # Emit real-time event to all clients in this motion item room
+            socketio.emit('motion_added', {
+                'motion_item_id': uid,
+                'motion': new_motion
+            }, room=uid)
+            
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
@@ -333,6 +354,22 @@ def patch_motion_endpoint(motion_item_id, motion_id):
 
     try:
         modify_motion_text(uid, motion_uuid, motion_text)
+        
+        # Get the updated motion
+        updated_item = mongo.db.motion_items.find_one(
+            {"motion_item_id": uid, "motions.motion_uuid": motion_uuid},
+            {"_id": 0, "motions.$": 1}
+        )
+        
+        if updated_item and updated_item.get("motions"):
+            updated_motion = updated_item["motions"][0]
+            
+            # Emit real-time event to all clients in this motion item room
+            socketio.emit('motion_updated', {
+                'motion_item_id': uid,
+                'motion': updated_motion
+            }, room=uid)
+            
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
