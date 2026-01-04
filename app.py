@@ -6,12 +6,13 @@ from flask import Blueprint
 
 from flask_pymongo import PyMongo
 from keycloak_auth import keycloak_protect, check_role
-from mq import publish_event
+from mq import publish_event, start_consumer
 import os
 import uuid
 import random
 
 from flask_socketio import SocketIO,join_room, leave_room, emit
+from datetime import datetime, timezone
 
 blueprint = Blueprint('blueprint', __name__)
 
@@ -23,9 +24,9 @@ if not app.config["MONGO_URI"]:
     raise RuntimeError("MONGO_URI not set")
 
 mongo = PyMongo(app)
-#socketio = SocketIO(app, cors_allowed_origins="*", #Changing this to * for testing purposes
-#                    message_queue=os.getenv("REDIS_URL", None),
-#                    async_mode='gevent')
+socketio = SocketIO(app, cors_allowed_origins="*", #Changing this to * for testing purposes
+                    message_queue=os.getenv("REDIS_URL", None),
+                    async_mode='gevent')
 
 # ---------------------------
 # SocketIO Events
@@ -164,6 +165,18 @@ def get_motion_item(motion_item_id):
     mongo.db.meetings.find_one({"meeting_id": motion_item_id})
 
 
+def _set_poll_state(motion_item_id, state: str, extra: dict = None):
+    """Helper to set poll subdocument state on a motion_item."""
+    update = {"poll.poll_state": state}
+    if extra:
+        for k, v in extra.items():
+            update[f"poll.{k}"] = v
+    mongo.db.motion_items.update_one(
+        {"motion_item_id": motion_item_id},
+        {"$set": update}
+    )
+
+
 # ---------------------------
 # Endpoints
 # ---------------------------
@@ -211,12 +224,19 @@ def add_motion_endpoint(motion_item_id):
     if not user_id: 
         return jsonify({"error": "Unauthorized"}), 401
 
-    if not check_role(request.user, poll.meeting_id, "view"):
-        return jsonify({"error": "Forbidden"}), 403
-    
     uid = to_uuid(motion_item_id)
     if not uid:
         return jsonify({"error": "Invalid UUID"}), 400
+
+    # Check if motion item exists
+    existing = mongo.db.motion_items.find_one({"motion_item_id": uid})
+    if not existing: 
+        return jsonify({"error": "Motion item not found"}), 404
+
+    # Check role against the meeting id from the motion item
+    meeting_id = existing.get("meeting_id")
+    if not check_role(request.user, meeting_id, "view"):
+        return jsonify({"error": "Forbidden"}), 403
     
     data = request.get_json()
     if not data: 
@@ -225,11 +245,6 @@ def add_motion_endpoint(motion_item_id):
     motion_text = data.get("motion")
     if not motion_text: 
         return jsonify({"error": "Missing 'motion'"}), 400
-
-    # Check if motion item exists
-    existing = mongo.db.motion_items.find_one({"motion_item_id": uid})
-    if not existing: 
-        return jsonify({"error": "Motion item not found"}), 404
 
     motion = {
         "owner": user_id,
@@ -276,9 +291,6 @@ def patch_motion_endpoint(motion_item_id, motion_id):
     if not user_id: 
         return jsonify({"error": "Unauthorized"}), 401
 
-    if not check_role(request.user, poll.meeting_id, "view"):
-        return jsonify({"error": "Forbidden"}), 403
-
     uid = to_uuid(motion_item_id)
     if not uid: 
         return jsonify({"error": "Invalid motion_item_id UUID"}), 400
@@ -304,11 +316,16 @@ def patch_motion_endpoint(motion_item_id, motion_id):
     if not motion_item:
         return jsonify({"error": "Motion item or motion not found"}), 404
 
+    # Check role against the meeting id from the motion item
+    meeting_id = motion_item.get("meeting_id")
+    if not check_role(request.user, meeting_id, "view"):
+        return jsonify({"error": "Forbidden"}), 403
+
     # Find the specific motion and check ownership
     motion_owner = None
     for motion in motion_item.get("motions", []):
         if motion.get("motion_uuid") == motion_uuid:
-            motion_owner = motion. get("owner")
+            motion_owner = motion.get("owner")
             break
     
     if motion_owner != user_id:
@@ -343,15 +360,81 @@ def on_event(event: dict):
         # }
         create_motion_item(data)
     if et == "motion.start_voting":
-        # data = {
-        #   meeting_id: uuid
-        #   motion_item_id: uuid
-        # }
+        # data = { meeting_id: uuid, motion_item_id: uuid, options?: [..], pollType?: 'single'|'ranked' }
+        meeting_id = data.get("meeting_id")
+        motion_item_id = data.get("motion_item_id")
+        options = data.get("options") or ["yes", "no", "abstain"]
+        poll_type = data.get("pollType") or "single"
+
+        if not meeting_id or not motion_item_id:
+            return
+
+        # Persist minimal poll info on motion item (no expected_voters)
+        poll_doc = {
+            "poll_state": "created",
+            "poll_options": options,
+            "poll_type": poll_type,
+            "poll_created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        mongo.db.motion_items.update_one(
+            {"motion_item_id": motion_item_id},
+            {"$set": {"poll": poll_doc}}
+        )
+
+        # Build vote payload and publish to VotingService (do not include expected_voters)
+        vote_data = {
+            "meeting_id": meeting_id,
+            # do not set poll_id so VotingService will assign and publish back poll_uuid
+            "pollType": poll_type,
+            "options": options,
+            "origin": {"motion_item_id": motion_item_id}
+        }
+
+        try:
+            publish_event("voting.create", {"vote": vote_data})
+        except Exception:
+            # best-effort publish
+            pass
+
+    if et == "voting.created":
+        # data: { poll_uuid, poll_id?, meeting_id, origin? }
+        poll_uuid = data.get("poll_uuid")
+        origin = data.get("origin") or {}
+        motion_item_id = origin.get("motion_item_id")
+        if motion_item_id and poll_uuid:
+            mongo.db.motion_items.update_one(
+                {"motion_item_id": motion_item_id},
+                {"$set": {"poll.poll_uuid": poll_uuid, "poll.poll_state": "open"}}
+            )
+
+    if et == "voting.completed":
+        # data: { poll_uuid, meeting_id, results, total_votes }
+        poll_uuid = data.get("poll_uuid")
+        results = data.get("results")
+        total_votes = data.get("total_votes")
+        if poll_uuid:
+            # find motion item by poll_uuid and mark completed
+            mongo.db.motion_items.update_one(
+                {"poll.poll_uuid": poll_uuid},
+                {"$set": {"poll.poll_state": "completed", "poll.results": results, "poll.total_votes": total_votes, "poll.completed_at": datetime.now(timezone.utc).isoformat()}}
+            )
+            # notify clients in the meeting room if we can find meeting_id
+            item = mongo.db.motion_items.find_one({"poll.poll_uuid": poll_uuid}, {"_id": 0})
+            if item:
+                meeting_id = item.get("meeting_id")
+                if meeting_id:
+                    socketio.emit("poll_completed", {"poll_uuid": poll_uuid, "results": results, "total_votes": total_votes}, room=meeting_id)
 
 # Start consumer thread (after app exists)
+default_bindings = os.getenv("MQ_BINDINGS", "motion.create_motion_item").split(",")
+# Ensure we listen for voting lifecycle events
+for rk in ["voting.created", "voting.completed"]:
+    if rk not in default_bindings:
+        default_bindings.append(rk)
+
 start_consumer(
     queue=os.getenv("MQ_QUEUE", "motion-service"),
-    bindings=os.getenv("MQ_BINDINGS", "motion.create_motion_item").split(","),
+    bindings=default_bindings,
     on_event=on_event,
 )
 
