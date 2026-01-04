@@ -1,53 +1,101 @@
 openapi: 3.1.1
 info:
   title: MotionService API
-  description: Handles API calls for making motions.
+  description: Handles API calls for making motions. 
   version: 0.1.0
 
 servers:
   - url: http://voting-dev.ltu-m7011e-2.se/api/motion-service
 
-paths:
-  /items/{motion_item_id}/:  
+paths: 
+  /items/{motion_item_id}/:   
     get:
-      summary: Get motion item info     
+      summary: Get motion item info
+      security:
+        - bearerAuth: []
       parameters:
         - in: path
           name: motion_item_id
-          required: true
-          schema:
+          required:  true
+          schema: 
             type: string
             format: uuid
       responses:
         "200":
-          description: Successfully got meeting info
+          description: Successfully got motion item info
+          content: 
+            application/json: 
+              schema: 
+                $ref: "#/components/schemas/MotionItem"
+        "400":
+          description: Invalid UUID
+          content: 
+            application/json: 
+              schema: 
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/MotionItem"
-  /items/{motion_item_id}/motions:
+                $ref: "#/components/schemas/Error"
+        "404": 
+          description: Motion item not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /items/{motion_item_id}/motions: 
     post:
       summary: Add a motion to the motion item
+      security:
+        - bearerAuth: []
       parameters:
         - in: path
           name: motion_item_id
-          required: true
-          schema:
+          required:  true
+          schema: 
             type: string
             format: uuid
-      requestBody:
+      requestBody: 
         required: true
-        content:
-          application/json:
-            schema:
+        content: 
+          application/json: 
+            schema: 
               $ref: "#/components/schemas/CreateMotionRequest"
       responses:
         "201":
           description: Motion added successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessMessage"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401": 
+          description: Unauthorized
+          content: 
+            application/json: 
+              schema: 
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Motion item not found
+          content: 
+            application/json: 
+              schema: 
+                $ref: "#/components/schemas/Error"
+
     get:
       summary: Get all motions
-      parameters:
-        - in: path
+      security:
+        - bearerAuth:  []
+      parameters: 
+        - in:  path
           name: motion_item_id
           required: true
           schema:
@@ -56,22 +104,43 @@ paths:
       responses:
         "200":
           description: Successfully got all motions
+          content: 
+            application/json:
+              schema: 
+                type: array
+                items: 
+                  $ref: "#/components/schemas/Motion"
+        "400":
+          description:  Invalid UUID
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Motion"
+                $ref: "#/components/schemas/Error"
+        "401": 
+          description: Unauthorized
+          content: 
+            application/json: 
+              schema: 
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Motion item not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /items/{motion_item_id}/motions/{motion_id}:
     patch:
-      summary: Change (or request change) to a motion text
+      summary: Change motion text (only owner can modify)
+      security:
+        - bearerAuth: []
       parameters:
         - in: path
           name: motion_item_id
           required: true
           schema:
-            type: string
-            format: uuid
+            type:  string
+            format:  uuid
         - in: path
           name: motion_id
           required: true
@@ -84,37 +153,142 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/PatchMotionRequest"
-      responses:
-        "200":
-          description: OK
+      responses: 
+        "200": 
+          description: Motion updated successfully
+          content: 
+            application/json:
+              schema: 
+                $ref: "#/components/schemas/SuccessMessage"
+        "400": 
+          description: Invalid request
+          content: 
+            application/json: 
+              schema: 
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Forbidden - only the motion owner can modify
+          content:
+            application/json: 
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Motion item or motion not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
 components:
-  schemas:
+  securitySchemes: 
+    bearerAuth: 
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description:  Keycloak JWT token
+
+  schemas: 
     MotionItem:
       type: object
-      description: A point in the meeting where decisions can be made.
-      properties:
+      description: A point in the meeting where decisions can be made. 
+      properties: 
         meeting_id:
           type: string
           format: uuid
-        items:
+          description: The ID of the meeting this motion item belongs to
+        motion_item_id:
+          type: string
+          format: uuid
+          description: The unique ID of this motion item
+        motions:
           type: array
           items:
             $ref: "#/components/schemas/Motion"
-        
       required:
         - meeting_id
-        - meeting_name
+        - motion_item_id
+        - motions
+      example:
+        meeting_id: "123e4567-e89b-12d3-a456-426614174000"
+        motion_item_id: "987fcdeb-51a2-3bc4-d567-426614174999"
+        motions:
+          - motion_uuid: "abcd1234-ef56-78gh-ij90-klmnopqrstuv"
+            owner: "johndoe"
+            motion: "I propose we adopt the new budget plan"
 
-    Motion:
+    Motion: 
       type: object
-      description: A motion
+      description: A motion submitted by a user
       properties:
-        motion_uuid:
+        motion_uuid: 
           type: string
           format: uuid
-        owner: 
+          description: The unique ID of this motion
+        owner:
           type: string
+          description: Username of the motion owner
         motion: 
           type: string
+          description: The motion text
+      required:
+        - motion_uuid
+        - owner
+        - motion
+      example: 
+        motion_uuid: "abcd1234-ef56-78gh-ij90-klmnopqrstuv"
+        owner: "johndoe"
+        motion: "I propose we adopt the new budget plan"
 
-    
+    CreateMotionRequest: 
+      type: object
+      description: Request body for creating a new motion
+      properties:
+        motion: 
+          type: string
+          description: The motion text
+      required:
+        - motion
+      example: 
+        motion: "I propose we adopt the new budget plan"
+
+    PatchMotionRequest:
+      type:  object
+      description: Request body for updating a motion
+      properties: 
+        motion: 
+          type: string
+          description: The new motion text
+      required:
+        - motion
+      example: 
+        motion: "I propose we adopt the revised budget plan"
+
+    SuccessMessage: 
+      type: object
+      description: Generic success response
+      properties: 
+        message:
+          type: string
+          description: Success message
+      required:
+        - message
+      example:
+        message: "Motion added successfully"
+
+    Error: 
+      type: object
+      description: Error response
+      properties: 
+        error:
+          type: string
+          description: Error message
+      required:
+        - error
+      example:
+        error: "Motion item not found"
