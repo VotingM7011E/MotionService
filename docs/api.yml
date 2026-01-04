@@ -8,22 +8,6 @@ servers:
   - url: http://voting-dev.ltu-m7011e-2.se/api/motion-service
 
 paths:
-  /items:
-    post:
-      summary: Create a new motion item.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreateMotionItemRequest"
-      responses:
-        "201":
-          description: Meeting successfully created.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MotionItem"
   /items/{motion_item_id}/:  
     get:
       summary: Get motion item info     

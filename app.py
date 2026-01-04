@@ -53,6 +53,14 @@ mongo = PyMongo(app)
 #    emit('Next Agenda Item', data, room=data['meeting_id'])
 #
 
+def to_uuid(id_str):
+    """Validate and convert UUID string."""
+    try:
+        return str(uuid.UUID(id_str))
+    except Exception:
+        return None
+
+
 # ---------------------------
 # Internal functions
 # ---------------------------
@@ -92,7 +100,8 @@ def create_motion_item(data: dict):
             raise ValueError(f"Missing 'motion_text' in {motion}")
         sanitized_motions.append({
             "owner": owner,
-            "motion": motion_text
+            "motion": motion_text,
+            "motion_uuid": str(uuid.uuid4())
         })
 
     mongo.db.motion_items.insert_one({
@@ -124,7 +133,8 @@ def add_motion_to_motion_item(motion_item_id, motion):
 
     sanitized_motion = {
         "owner": owner,
-        "motion": motion_text
+        "motion": motion_text,
+        "motion_uuid": str(uuid.uuid4())
     }
 
     mongo.db.motion_items.update_one(
@@ -132,7 +142,26 @@ def add_motion_to_motion_item(motion_item_id, motion):
         {"$push": {"motions": sanitized_motion}}
     )
 
+def modify_motion_text(motion_item_id, motion_uuid, motion_text):
+    if not motion_item_id:
+        raise ValueError("Missing 'motion_item_id'")
+    if not motion_uuid: 
+        raise ValueError("Missing 'motion_uuid'")
+    if not motion_text:
+        raise ValueError("Missing 'motion_text'")
 
+    mongo.db.motion_items.update_one(
+        {
+            "motion_item_id": motion_item_id,
+            "motions.motion_uuid": motion_uuid
+        },
+        {"$set": {"motions.$.motion":  motion_text}}
+    )
+
+def get_motion_item(motion_item_id):
+    if not motion_item_id:
+        raise ValueError("Missing 'motion_item_id'")
+    mongo.db.meetings.find_one({"meeting_id": motion_item_id})
 
 
 # ---------------------------
@@ -140,7 +169,6 @@ def add_motion_to_motion_item(motion_item_id, motion):
 # ---------------------------
 
 # put this sippet ahead of all your bluprints
-# blueprint can also be app~~
 @blueprint.after_request 
 def after_request(response):
     header = response.headers
@@ -151,216 +179,181 @@ def after_request(response):
     return response
 
 
-
-
-
-@blueprint.post("/meetings")
-@keycloak_protect
-def create_meeting():
+@blueprint.get("/items/<motion_item_id>/")
+def get_motion_item_endpoint(motion_item_id):
     """
-    POST /meetings
-    Create a new meeting.
+    GET /items/{motion_item_id}/
+    Return motion item info. 
+    """
+    uid = to_uuid(motion_item_id)
+    if not uid: 
+        return jsonify({"error": "Invalid UUID"}), 400
+    
+    motion_item = mongo.db.motion_items.find_one(
+        {"motion_item_id":  uid},
+        {"_id": 0}  # Exclude MongoDB's _id from response
+    )
+    
+    if not motion_item: 
+        return jsonify({"error": "Motion item not found"}), 404
+
+    return jsonify(motion_item), 200
+
+
+@blueprint.post("/items/<motion_item_id>/motions")
+@keycloak_protect
+def add_motion_endpoint(motion_item_id):
+    """
+    POST /items/{motion_item_id}/motions
+    Add a motion to the motion item. 
     """
     user_id = request.user["preferred_username"]
     if not user_id: 
-        return jsonify({"error": "Unauthorized'"}), 401
+        return jsonify({"error": "Unauthorized"}), 401
 
-    body = request.get_json()
-    if not body or "meeting_name" not in body:
-        return jsonify({"error": "meeting_name required"}), 400
+    if not check_role(request.user, poll.meeting_id, "view"):
+        return jsonify({"error": "Forbidden"}), 403
+    
+    uid = to_uuid(motion_item_id)
+    if not uid:
+        return jsonify({"error": "Invalid UUID"}), 400
+    
+    data = request.get_json()
+    if not data: 
+        return jsonify({"error": "Missing request body"}), 400
+    
+    motion_text = data.get("motion")
+    if not motion_text: 
+        return jsonify({"error": "Missing 'motion'"}), 400
 
-    print(request.user)
+    # Check if motion item exists
+    existing = mongo.db.motion_items.find_one({"motion_item_id": uid})
+    if not existing: 
+        return jsonify({"error": "Motion item not found"}), 404
 
-    meeting_id = str(uuid.uuid4())
-    meeting_code = generate_unique_meeting_code()
-
-    mongo.db.meetings.insert_one({
-        "meeting_id": meeting_id,
-        "meeting_name": body["meeting_name"],
-        "current_item": 0,
-        "meeting_code": meeting_code
-    })
-
-    publish_event(
-        routing_key="permission.create_meeting",
-        data={
-            "meeting_id": meeting_id,
-            "creator_username": user_id
-        }
-    )
-
-    created = {
-        "meeting_id": meeting_id,
-        "meeting_name": body["meeting_name"],
-        "current_item": 0,
-        "items": [],
-        "meeting_code": meeting_code
+    motion = {
+        "owner": user_id,
+        "motion":  motion_text
     }
-
-    return jsonify(created), 201
-
-@blueprint.get("/meetings/<id>/")
-def get_meeting(id):
-    """
-    GET /meetings/{id}/
-    Return meeting info.
-    """
-    uid = to_uuid(id)
-    if not uid:
-        return jsonify({"error": "Invalid UUID"}), 400
-
-    meeting = mongo.db.meetings.find_one({"meeting_id": uid})
-    if not meeting:
-        return jsonify({"error": "Meeting not found"}), 404
-
-    agenda_items = list(mongo.db.agenda_items.find({"meeting_id": uid}))
-
-    return jsonify(serialize_meeting(meeting, agenda_items)), 200
-
-@blueprint.patch("/meetings/<meeting_id>")
-@keycloak_protect
-def update_meeting(meeting_id):
-    """
-    PATCH /meetings/{meeting_id}
-    Update meeting fields such as current_item.
-    """
     
-    uid = to_uuid(meeting_id)
-    if not uid:
+    try:
+        add_motion_to_motion_item(uid, motion)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify({"message": "Motion added successfully"}), 201
+
+
+@blueprint. get("/items/<motion_item_id>/motions")
+def get_motions_endpoint(motion_item_id):
+    """
+    GET /items/{motion_item_id}/motions
+    Get all motions for a motion item.
+    """
+    uid = to_uuid(motion_item_id)
+    if not uid: 
         return jsonify({"error": "Invalid UUID"}), 400
-
-    user_id = request.user["preferred_username"]
-    if not user_id: 
-        return jsonify({"error": "Unauthorized'"}), 401
-
-    if not check_role(request.user, meeting_id, "manage"):
-        return jsonify({"error": "Forbidden"}), 403
     
-    meeting = mongo.db.meetings.find_one({"meeting_id": uid})
-    if not meeting:
-        return jsonify({"error": "Meeting not found"}), 404
-
-    body = request.get_json()
-    if not body:
-        return jsonify({"error": "Request body required"}), 400
-
-    update_fields = {}
-
-    # Validate and update current_item
-    if "current_item" in body:
-        new_index = body["current_item"]
-
-        if type(new_index) is not int or new_index < 0:
-            return jsonify({"error": "current_item must be a non-negative integer"}), 400
-
-        # Count agenda items
-        item_count = mongo.db.agenda_items.count_documents({"meeting_id": uid})
-
-        # Check if index is within valid range
-        if new_index >= item_count:
-            return jsonify({
-                "error": "current_item is out of range",
-                "max_valid_index": max(item_count - 1, 0),
-                "agenda_items": item_count
-            }), 400
-
-        update_fields["current_item"] = new_index
-
-    if not update_fields:
-        return jsonify({"error": "No valid fields to update"}), 400
-
-    # Apply patch
-    mongo.db.meetings.update_one(
-        {"meeting_id": uid},
-        {"$set": update_fields}
+    motion_item = mongo.db.motion_items.find_one(
+        {"motion_item_id": uid},
+        {"_id":  0, "motions": 1}
     )
-
-    # Return updated meeting
-    updated_meeting = mongo.db.meetings.find_one({"meeting_id": uid})
-    items = list(mongo.db.agenda_items.find({"meeting_id": uid}))
-
-    socketio.emit('Next Agenda Item', {"meeting_id": uid, "current_item": new_index}, room=uid)
-    socketio.emit('meeting_updated', serialize_meeting(updated_meeting, items), room=uid)
-
-    return jsonify(serialize_meeting(updated_meeting, items)), 200
-
-@blueprint.post("/meetings/<meeting_id>/agenda")
-@keycloak_protect
-def add_agenda_item(meeting_id):
-    """
-    POST /meetings/{meeting_id}/agenda
-    Add an agenda item to meeting.
-    """
     
-    uid = to_uuid(meeting_id)
-    if not uid:
-        return jsonify({"error": "Invalid UUID"}), 400
+    if not motion_item:
+        return jsonify({"error": "Motion item not found"}), 404
 
+    motions = motion_item.get("motions", [])
+    return jsonify(motions), 200
+
+@blueprint.patch("/items/<motion_item_id>/motions/<motion_id>")
+@keycloak_protect
+def patch_motion_endpoint(motion_item_id, motion_id):
+    """
+    PATCH /items/{motion_item_id}/motions/{motion_id}
+    Change motion text. Only the motion owner can modify.
+    """
     user_id = request.user["preferred_username"]
     if not user_id: 
-        return jsonify({"error": "Unauthorized'"}), 401
+        return jsonify({"error": "Unauthorized"}), 401
 
-    if not check_role(request.user, meeting_id, "manage"):
+    if not check_role(request.user, poll.meeting_id, "view"):
         return jsonify({"error": "Forbidden"}), 403
 
-    meeting = mongo.db.meetings.find_one({"meeting_id": uid})
-    if not meeting:
-        return jsonify({"error": "Meeting not found"}), 404
-
-    body = request.get_json()
-    if not body or "item" not in body:
-        return jsonify({"error": "item required"}), 400
-
-    item = serialize_agenda_item(body["item"])
-    if item is None:
-        return jsonify({"error": "Invalid agenda item type"}), 400
-    if isinstance(item, tuple):
-        return item
+    uid = to_uuid(motion_item_id)
+    if not uid: 
+        return jsonify({"error": "Invalid motion_item_id UUID"}), 400
     
-    # Insert agenda item under meeting
-    inserted = mongo.db.agenda_items.insert_one({
-        "meeting_id": uid,
-        **item
+    motion_uuid = to_uuid(motion_id)
+    if not motion_uuid:
+        return jsonify({"error": "Invalid motion_id UUID"}), 400
+    
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Missing request body"}), 400
+    
+    motion_text = data.get("motion")
+    if not motion_text: 
+        return jsonify({"error": "Missing 'motion'"}), 400
+
+    # Check if motion item and motion exist, and get owner
+    motion_item = mongo.db.motion_items.find_one({
+        "motion_item_id": uid,
+        "motions.motion_uuid": motion_uuid
     })
+    
+    if not motion_item:
+        return jsonify({"error": "Motion item or motion not found"}), 404
 
-    # Emit WebSocket event to notify clients
-    socketio.emit('agenda_item_added', {"meeting_id": uid, "item": item}, room=uid)
+    # Find the specific motion and check ownership
+    motion_owner = None
+    for motion in motion_item.get("motions", []):
+        if motion.get("motion_uuid") == motion_uuid:
+            motion_owner = motion. get("owner")
+            break
+    
+    if motion_owner != user_id:
+        return jsonify({"error": "Only the motion owner can modify this motion"}), 403
 
-    return jsonify({"message": "Agenda item added"}), 201
+    try:
+        modify_motion_text(uid, motion_uuid, motion_text)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
-@blueprint.get("/meetings/<id>/agenda")
-def get_agenda_items(id):
-    """
-    GET /meetings/{id}/agenda
-    Returns all agenda items for the meeting.
-    """
-    uid = to_uuid(id)
-    if not uid:
-        return jsonify({"error": "Invalid UUID"}), 400
+    return jsonify({"message": "Motion updated successfully"}), 200
 
-    meeting = mongo.db.meetings.find_one({"meeting_id": uid})
-    if not meeting:
-        return jsonify({"error": "Meeting not found"}), 404
 
-    agenda_items = list(mongo.db.agenda_items.find({"meeting_id": uid}))
+# --- Inter-service -----------------
 
-    return jsonify(agenda_items), 200
+def on_event(event: dict):
+    # event envelope: {event_type, data, ...}
+    et = event.get("event_type")
+    data = event.get("data", {})
 
-@blueprint.get("/code/<code>")
-def get_meeting_id_from_code(code):
-    """
-    GET /code/{code}
-    Returns the meeting UUID in plain text.
-    """
-    # Validate length & numeric
-    if len(code) != 6 or not code.isdigit():
-        return jsonify({"error": "Invalid meeting code format"}), 400
+    if et == "motion.create_motion_item":
+        # Expects data on the form
+        # data = {
+        #   meeting_id: uuid
+        #   motion_item_id: uuid
+        #   motions: [
+        #       {
+        #           owner: username
+        #           motion: string
+        #       }
+        #   ]
+        # }
+        create_motion_item(data)
+    if et == "motion.start_voting":
+        # data = {
+        #   meeting_id: uuid
+        #   motion_item_id: uuid
+        # }
 
-    meeting = mongo.db.meetings.find_one({"meeting_code": code})
-    if not meeting:
-        return "", 404
-
-    return meeting["meeting_id"], 200
+# Start consumer thread (after app exists)
+start_consumer(
+    queue=os.getenv("MQ_QUEUE", "motion-service"),
+    bindings=os.getenv("MQ_BINDINGS", "motion.create_motion_item").split(","),
+    on_event=on_event,
+)
 
 # Root health check (for Kubernetes)
 @app.get("/")
