@@ -1,0 +1,11 @@
+flask
+flask-pymongo
+python-jose 
+requests 
+cachetools
+flask-socketio
+gevent
+gevent-websocket
+flask-cors
+redis
+pika

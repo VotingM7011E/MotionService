@@ -1,0 +1,136 @@
+openapi: 3.1.1
+info:
+  title: MotionService API
+  description: Handles API calls for making motions.
+  version: 0.1.0
+
+servers:
+  - url: http://voting-dev.ltu-m7011e-2.se/api/motion-service
+
+paths:
+  /items:
+    post:
+      summary: Create a new motion item.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMotionItemRequest"
+      responses:
+        "201":
+          description: Meeting successfully created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MotionItem"
+  /items/{motion_item_id}/:  
+    get:
+      summary: Get motion item info     
+      parameters:
+        - in: path
+          name: motion_item_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Successfully got meeting info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MotionItem"
+  /items/{motion_item_id}/motions:
+    post:
+      summary: Add a motion to the motion item
+      parameters:
+        - in: path
+          name: motion_item_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMotionRequest"
+      responses:
+        "201":
+          description: Motion added successfully
+    get:
+      summary: Get all motions
+      parameters:
+        - in: path
+          name: motion_item_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Successfully got all motions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Motion"
+  /items/{motion_item_id}/motions/{motion_id}:
+    patch:
+      summary: Change (or request change) to a motion text
+      parameters:
+        - in: path
+          name: motion_item_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: path
+          name: motion_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchMotionRequest"
+      responses:
+        "200":
+          description: OK
+components:
+  schemas:
+    MotionItem:
+      type: object
+      description: A point in the meeting where decisions can be made.
+      properties:
+        meeting_id:
+          type: string
+          format: uuid
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Motion"
+        
+      required:
+        - meeting_id
+        - meeting_name
+
+    Motion:
+      type: object
+      description: A motion
+      properties:
+        motion_uuid:
+          type: string
+          format: uuid
+        owner: 
+          type: string
+        motion: 
+          type: string
+
+    

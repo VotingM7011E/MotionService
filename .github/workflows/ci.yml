@@ -1,0 +1,100 @@
+name: Build, Push, and Update GitOps
+
+on:
+  push:
+    branches: [ "main", "staging", "dev" ]
+
+concurrency:
+  group: gitops-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPO: ghcr.io/votingm7011e/motionservice
+  GITOPS_REPO: votingm7011e/gitops
+  GITOPS_BRANCH: main
+  APP_FILE: motion-service.yaml
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Detect changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            build:
+              - 'Dockerfile'
+              - 'app.py'
+              - 'keycloak_auth.py'
+              - 'mq.py'
+              - '.github/workflows/**'
+
+      - name: Stop early if no build needed
+        if: steps.filter.outputs.build != 'true'
+        run: echo "No relevant changes; skipping." && exit 0
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Clone GitOps repo
+        run: |
+          git clone --depth 1 --branch "${{ env.GITOPS_BRANCH }}" "https://x-access-token:${{ secrets.GITOPS_TOKEN }}@github.com/${{ env.GITOPS_REPO }}.git" gitops-repo
+
+      - name: Resolve target environment
+        id: resolve
+        shell: bash
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            main)    TARGET_ENV="dev" ;;
+            staging) TARGET_ENV="staging" ;;
+            dev)     TARGET_ENV="dev" ;;
+            *) echo "Unsupported branch '${GITHUB_REF_NAME}'. "; exit 1 ;;
+          esac
+          echo "TARGET_ENV=$TARGET_ENV" >> "$GITHUB_OUTPUT"
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_REPO }}
+          tags: |
+            type=raw,value=${{ github.sha }}
+
+      - name: Build and push Docker image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Update image tag in GitOps file
+        uses: mikefarah/yq@master
+        with:
+          cmd: yq eval '.image.tag = "${{ steps.meta.outputs.tag-names }}"' -i "gitops-repo/environments/${{ steps.resolve.outputs.TARGET_ENV }}/${{ env.APP_FILE }}"
+
+      - name: Commit and push GitOps update
+        run: |
+          cd gitops-repo
+          git config user.name "GitOps CI"
+          git config user.email "actions@github.com"
+          git add .
+          git commit -m "chore: update image tag to ${{ steps.meta.outputs.tag-names }} [skip ci]" || echo "No changes to commit"
+          git push origin "${{ env.GITOPS_BRANCH }}" || (sleep 5 && git push origin "${{ env.GITOPS_BRANCH }}")
