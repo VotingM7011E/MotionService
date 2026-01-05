@@ -92,8 +92,8 @@ def create_motion_item(data: dict):
         raise ValueError("Missing 'meeting_id'")
     if not motion_item_id:
         raise ValueError("Missing 'motion_item_id'")
-    if not motions:
-        raise ValueError("Missing 'motions'")
+    #if not motions: bc empty array is fine but python thinks it is falsy!!!!
+    #    raise ValueError("Missing 'motions'")
 
     sanitized_motions = []
 
