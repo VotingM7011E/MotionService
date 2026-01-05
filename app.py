@@ -423,7 +423,11 @@ def on_event(event: dict):
         #   ]
         # }
         print(f"📥 Received motion.create_motion_item event: {data}")
-        create_motion_item(data)
+        try:
+            create_motion_item(data)
+        except Exception as e:
+            print(f"❌ Failed to create motion item: {e}")
+            raise e
     if et == "motion.start_voting":
         # data = { meeting_id: uuid, motion_item_id: uuid }
         # Creates sequential polls for each motion, one at a time
