@@ -514,9 +514,9 @@ def on_event(event: dict):
             print(f"⚠️ Incomplete voting.created data - motion_item_id: {motion_item_id}, poll_uuid: {poll_uuid}, motion_uuid: {motion_uuid}")
 
     if et == "voting.completed":
-        # data: { poll_uuid, meeting_id, results, total_votes }
+        # data: { poll_id, meeting_id, results, total_votes }
         print(f"📥 Received voting.completed event: {data}")
-        poll_uuid = data.get("poll_uuid")
+        poll_uuid = data.get("poll_id")
         results = data.get("results")
         total_votes = data.get("total_votes")
         
